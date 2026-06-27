@@ -1,0 +1,41 @@
+rules_version = '2';
+
+// ---------------------------------------------------------------------------
+// BELANGRIJK: vervang VUL_HIER_JOUW_FIREBASE_UID_IN hieronder door jouw eigen
+// Firebase UID (te vinden in Firebase Console -> Authentication -> Users,
+// nadat je voor het eerst hebt ingelogd of een account hebt aangemaakt).
+// Zonder deze stap kan NIEMAND data lezen/schrijven (fail-safe / dicht).
+// ---------------------------------------------------------------------------
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner() {
+      return request.auth != null && request.auth.uid == "m5e91Bn2BXaPOaSNTIlakFehuVz1";
+    }
+
+    // Chats en berichten: alleen de eigenaar mag lezen/schrijven,
+    // en alleen onder zijn eigen users/{uid} pad.
+    match /users/{uid}/chats/{chatId} {
+      allow read, write: if isOwner() && uid == request.auth.uid;
+
+      match /messages/{messageId} {
+        allow read, write: if isOwner() && uid == request.auth.uid;
+      }
+    }
+
+    // Config (NVIDIA API key, model settings): alleen de eigenaar mag dit
+    // lezen/schrijven, rechtstreeks vanuit de browser (er is geen Cloud
+    // Function meer die dit voor je afschermt). Omdat alleen jouw account
+    // ooit kan inloggen (zie isOwner), is dit voor jouw 1-persoons-app
+    // voldoende afgeschermd.
+    match /config/{document=**} {
+      allow read, write: if isOwner();
+    }
+
+    // Alles wat hierboven niet expliciet is toegestaan: standaard dicht.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
