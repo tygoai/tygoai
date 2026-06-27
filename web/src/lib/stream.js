@@ -1,24 +1,7 @@
-// -----------------------------------------------------------------------------
-// Praat rechtstreeks vanuit de browser met de NVIDIA API en streamt het
-// antwoord live terug. Er is GEEN server tussen jou en NVIDIA: dit werkt
-// puur met Firebase Auth (login) + Firestore (chatgeschiedenis + key-opslag)
-// en is daarom volledig gratis te hosten, ook via GitHub Pages.
-//
-// Bewuste afweging: hierdoor is de NVIDIA API-key zichtbaar in de browser
-// (devtools) van wie ook is ingelogd. Omdat de app is afgesloten tot precies
-// 1 account (zie lib/auth.jsx), is dat in deze opzet geen probleem: niemand
-// anders kan ooit inloggen en de key dus nooit zien.
-// -----------------------------------------------------------------------------
-
 import { getNvidiaSettings } from "./settings.js";
 
-const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+const WORKER_URL = "https://tygoai-proxy.tygoai.workers.dev";
 
-/**
- * Stuurt berichten naar NVIDIA en streamt het antwoord terug.
- * Roept onChunk("reasoning"|"content", text) aan voor elk stukje tekst,
- * en onDone() wanneer de stream klaar is.
- */
 export async function streamChat(messages, { onChunk, onDone, onError }) {
   let settings;
   try {
@@ -33,9 +16,14 @@ export async function streamChat(messages, { onChunk, onDone, onError }) {
     return;
   }
 
+  if (!WORKER_URL || WORKER_URL.startsWith("VUL_IN")) {
+    onError?.(new Error("De Cloudflare Worker URL is nog niet ingesteld in lib/stream.js."));
+    return;
+  }
+
   let response;
   try {
-    response = await fetch(NVIDIA_URL, {
+    response = await fetch(WORKER_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -55,11 +43,7 @@ export async function streamChat(messages, { onChunk, onDone, onError }) {
       })
     });
   } catch (e) {
-    onError?.(
-      new Error(
-        "Kon NVIDIA niet bereiken. Check je internetverbinding. (" + e.message + ")"
-      )
-    );
+    onError?.(new Error("Kon de Worker niet bereiken. (" + e.message + ")"));
     return;
   }
 
@@ -68,7 +52,7 @@ export async function streamChat(messages, { onChunk, onDone, onError }) {
     try {
       detail = await response.text();
     } catch {}
-    onError?.(new Error(`NVIDIA API fout (${response.status}): ${detail.slice(0, 400)}`));
+    onError?.(new Error(`Fout (${response.status}): ${detail.slice(0, 400)}`));
     return;
   }
 
@@ -82,7 +66,6 @@ export async function streamChat(messages, { onChunk, onDone, onError }) {
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      // NVIDIA stuurt SSE-regels: "data: {...}\n\n", afgesloten met "data: [DONE]"
       const lines = buffer.split("\n");
       buffer = lines.pop();
 
@@ -96,7 +79,7 @@ export async function streamChat(messages, { onChunk, onDone, onError }) {
         try {
           json = JSON.parse(payload);
         } catch {
-          continue; // incomplete/ongeldige chunk, kan gebeuren bij streaming
+          continue;
         }
 
         const delta = json.choices?.[0]?.delta;
