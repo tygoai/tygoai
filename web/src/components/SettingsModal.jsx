@@ -1,7 +1,26 @@
 import { useEffect, useState } from "react";
 import { getNvidiaSettings, saveNvidiaSettings } from "../lib/settings.js";
+import { BUDGET_LABELS } from "../lib/autoBudget.js";
 
-export default function SettingsModal({ onClose }) {
+const PRESETS = [
+  {
+    id: "auto",
+    label: "Auto",
+    description: "Bepaalt automatisch per vraag hoeveel denktijd nodig is. Standaard."
+  },
+  {
+    id: "snel",
+    label: "Snel",
+    description: "Altijd minimale denktijd — voor de snelste antwoorden."
+  },
+  {
+    id: "slim",
+    label: "Slim",
+    description: "Altijd meer reasoning — voor de meest doordachte antwoorden."
+  }
+];
+
+export default function SettingsModal({ onClose, tokenUsage }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState("");
@@ -12,6 +31,12 @@ export default function SettingsModal({ onClose }) {
   const [model, setModel] = useState("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning");
   const [temperature, setTemperature] = useState(0.6);
   const [topP, setTopP] = useState(0.95);
+  const [budgetMode, setBudgetMode] = useState("auto");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // Geavanceerde/handmatige fallback-waarden (alleen relevant als je ooit
+  // budget_mode handmatig zou willen overschrijven via eigen aanpassingen;
+  // de presets hierboven zijn voor het normale gebruik leidend).
   const [maxTokens, setMaxTokens] = useState(4096);
   const [reasoningBudget, setReasoningBudget] = useState(4096);
   const [enableThinking, setEnableThinking] = useState(true);
@@ -27,6 +52,7 @@ export default function SettingsModal({ onClose }) {
         setMaxTokens(d.max_tokens);
         setReasoningBudget(d.reasoning_budget);
         setEnableThinking(d.enable_thinking);
+        setBudgetMode(d.budget_mode || "auto");
       } catch (e) {
         setErrorMsg("Kon instellingen niet laden: " + e.message);
       } finally {
@@ -47,7 +73,8 @@ export default function SettingsModal({ onClose }) {
         top_p: Number(topP),
         max_tokens: Number(maxTokens),
         reasoning_budget: Number(reasoningBudget),
-        enable_thinking: enableThinking
+        enable_thinking: enableThinking,
+        budget_mode: budgetMode
       };
       if (apiKey.trim()) payload.apiKey = apiKey.trim();
       await saveNvidiaSettings(payload);
@@ -62,16 +89,19 @@ export default function SettingsModal({ onClose }) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={onClose}>
+    <div
+      className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 modal-backdrop-in"
+      onClick={onClose}
+    >
       <div
-        className="mac-window-in w-[460px] max-h-[85vh] overflow-y-auto mac-scroll rounded-mac shadow-mac bg-macpanel backdrop-blur-mac border border-macborder"
+        className="mac-window-in w-[480px] max-h-[85vh] overflow-y-auto mac-scroll rounded-mac shadow-mac bg-macpanel backdrop-blur-mac border border-macborder"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="h-11 flex items-center px-4 bg-macpanel2 border-b border-macborder sticky top-0">
           <div className="flex gap-2">
             <button
               onClick={onClose}
-              className="w-3 h-3 rounded-full bg-macred hover:opacity-70 transition"
+              className="w-3 h-3 rounded-full bg-macred hover:opacity-70 transition-opacity"
               title="Sluiten"
             />
             <span className="w-3 h-3 rounded-full bg-macyellow" />
@@ -93,86 +123,111 @@ export default function SettingsModal({ onClose }) {
                   placeholder={hasKey ? "•••••••••••••••• (laat leeg om te behouden)" : "nvapi-..."}
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
-                  className="w-full h-9 rounded-[9px] px-3 text-[13.5px] bg-white/70 border border-macborder focus:outline-none focus:ring-2 focus:ring-macblue/40"
+                  className="w-full h-9 rounded-[9px] px-3 text-[13.5px] bg-white/70 border border-macborder focus:outline-none focus:ring-2 focus:ring-macblue/40 transition-shadow"
                 />
               </Field>
 
-              <Field label="Model">
-                <input
-                  type="text"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  className="w-full h-9 rounded-[9px] px-3 text-[13.5px] bg-white/70 border border-macborder focus:outline-none focus:ring-2 focus:ring-macblue/40 font-mono"
-                />
+              {/* Denktijd-presets (feature 10) — vervangt de handmatige slider als
+                  primaire manier om het reasoning-gedrag te kiezen. */}
+              <Field label="Denktijd">
+                <div className="grid grid-cols-3 gap-2">
+                  {PRESETS.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => setBudgetMode(p.id)}
+                      className={`rounded-[10px] border px-3 py-2.5 text-left transition-all duration-150 active:scale-[0.97] ${
+                        budgetMode === p.id
+                          ? "border-macblue bg-macblue/[0.08] ring-1 ring-macblue/30"
+                          : "border-macborder bg-white/60 hover:bg-white/90"
+                      }`}
+                    >
+                      <div
+                        className={`text-[13px] font-medium mb-0.5 ${
+                          budgetMode === p.id ? "text-macblue" : "text-macink"
+                        }`}
+                      >
+                        {p.label}
+                      </div>
+                      <div className="text-[10.5px] text-macsub leading-snug">{p.description}</div>
+                    </button>
+                  ))}
+                </div>
               </Field>
 
-              <div className="grid grid-cols-2 gap-4">
-                <Field label={`Temperature: ${temperature}`}>
-                  <input
-                    type="range"
-                    min="0"
-                    max="1.5"
-                    step="0.05"
-                    value={temperature}
-                    onChange={(e) => setTemperature(e.target.value)}
-                    className="w-full accent-macblue"
-                  />
-                </Field>
-                <Field label={`Top-p: ${topP}`}>
-                  <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.01"
-                    value={topP}
-                    onChange={(e) => setTopP(e.target.value)}
-                    className="w-full accent-macblue"
-                  />
-                </Field>
-              </div>
+              {/* Live token-usage tracker (feature 7) */}
+              <Field label="Token-gebruik (live, laatste bericht)">
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <TokenStat label="Prompt" value={tokenUsage?.promptTokens ?? 0} />
+                  <TokenStat label="Completion" value={tokenUsage?.completionTokens ?? 0} />
+                  <TokenStat label="Totaal" value={tokenUsage?.totalTokens ?? 0} />
+                </div>
+                <span className="text-[11px] text-macsub mt-1">
+                  Dit model is gratis via NVIDIA — er zijn dus geen kosten verbonden aan dit gebruik.
+                </span>
+              </Field>
 
-              <div className="grid grid-cols-2 gap-4">
-                <Field label="Max tokens">
-                  <input
-                    type="number"
-                    min="256"
-                    max="65536"
-                    step="256"
-                    value={maxTokens}
-                    onChange={(e) => setMaxTokens(e.target.value)}
-                    className="w-full h-9 rounded-[9px] px-3 text-[13.5px] bg-white/70 border border-macborder focus:outline-none focus:ring-2 focus:ring-macblue/40"
-                  />
-                </Field>
-                <Field label="Reasoning budget">
-                  <input
-                    type="number"
-                    min="0"
-                    max="32768"
-                    step="256"
-                    value={reasoningBudget}
-                    onChange={(e) => setReasoningBudget(e.target.value)}
-                    className="w-full h-9 rounded-[9px] px-3 text-[13.5px] bg-white/70 border border-macborder focus:outline-none focus:ring-2 focus:ring-macblue/40"
-                  />
-                </Field>
-              </div>
+              <button
+                onClick={() => setShowAdvanced((v) => !v)}
+                className="text-[12px] text-macsub hover:text-macink transition-colors flex items-center gap-1 -mt-1"
+              >
+                <span className={`transition-transform duration-200 ${showAdvanced ? "rotate-90" : ""}`}>›</span>
+                Geavanceerde instellingen
+              </button>
 
-              <label className="flex items-center gap-2.5 text-[13.5px] text-macink cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={enableThinking}
-                  onChange={(e) => setEnableThinking(e.target.checked)}
-                  className="w-4 h-4 accent-macblue"
-                />
-                Denkproces (reasoning) inschakelen
-              </label>
+              <div
+                className="overflow-hidden transition-all duration-300 ease-out"
+                style={{ maxHeight: showAdvanced ? "640px" : "0px", opacity: showAdvanced ? 1 : 0 }}
+              >
+                <div className="flex flex-col gap-5 pt-1">
+                  <Field label="Model">
+                    <input
+                      type="text"
+                      value={model}
+                      onChange={(e) => setModel(e.target.value)}
+                      className="w-full h-9 rounded-[9px] px-3 text-[13.5px] bg-white/70 border border-macborder focus:outline-none focus:ring-2 focus:ring-macblue/40 font-mono"
+                    />
+                  </Field>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <Field label={`Temperature: ${temperature}`}>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1.5"
+                        step="0.05"
+                        value={temperature}
+                        onChange={(e) => setTemperature(e.target.value)}
+                        className="w-full accent-macblue"
+                      />
+                    </Field>
+                    <Field label={`Top-p: ${topP}`}>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={topP}
+                        onChange={(e) => setTopP(e.target.value)}
+                        className="w-full accent-macblue"
+                      />
+                    </Field>
+                  </div>
+
+                  <p className="text-[11px] text-macsub leading-snug">
+                    Max tokens en reasoning-budget worden nu automatisch bepaald door de gekozen
+                    denktijd-modus hierboven (Auto/Snel/Slim) en hoeven hier niet meer apart
+                    ingesteld te worden.
+                  </p>
+                </div>
+              </div>
 
               {savedMsg && (
-                <div className="text-[12.5px] text-macgreen bg-macgreen/10 rounded-lg px-3 py-2">
+                <div className="text-[12.5px] text-macgreen bg-macgreen/10 rounded-lg px-3 py-2 fade-in-up">
                   {savedMsg}
                 </div>
               )}
               {errorMsg && (
-                <div className="text-[12.5px] text-macred bg-macred/10 rounded-lg px-3 py-2">
+                <div className="text-[12.5px] text-macred bg-macred/10 rounded-lg px-3 py-2 fade-in-up">
                   {errorMsg}
                 </div>
               )}
@@ -180,7 +235,7 @@ export default function SettingsModal({ onClose }) {
               <button
                 onClick={handleSave}
                 disabled={saving}
-                className="h-9 rounded-[9px] bg-macblue text-white text-[13.5px] font-medium hover:bg-macblue2 active:scale-[0.98] transition disabled:opacity-50"
+                className="h-9 rounded-[9px] bg-macblue text-white text-[13.5px] font-medium hover:bg-macblue2 active:scale-[0.98] transition-all disabled:opacity-50"
               >
                 {saving ? "Opslaan…" : "Opslaan"}
               </button>
@@ -198,6 +253,17 @@ function Field({ label, hint, children }) {
       <label className="text-[12.5px] font-medium text-macink">{label}</label>
       {children}
       {hint && <span className="text-[11.5px] text-macsub">{hint}</span>}
+    </div>
+  );
+}
+
+function TokenStat({ label, value }) {
+  return (
+    <div className="rounded-[9px] bg-black/[0.035] border border-macborder px-2 py-2">
+      <div className="text-[15px] font-semibold text-macink tabular-nums transition-all duration-200">
+        {value.toLocaleString("nl-NL")}
+      </div>
+      <div className="text-[10.5px] text-macsub mt-0.5">{label}</div>
     </div>
   );
 }

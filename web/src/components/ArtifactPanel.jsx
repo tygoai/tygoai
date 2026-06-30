@@ -1,31 +1,44 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { isHtmlArtifact } from "../lib/artifacts.js";
+
+const MIN_WIDTH = 320;
+const MAX_WIDTH = 900;
 
 /**
  * Klein kaartje dat in de chatbubble verschijnt op de plek van een codeblok.
- * Klikken opent het volledige ArtifactPanel ernaast.
+ * Klikken opent het volledige ArtifactPanel ernaast. Tijdens streaming
+ * toont het kaartje een live-indicator (feature 2).
  */
 export function ArtifactCard({ artifact, onOpen, isActive }) {
   const lineCount = artifact.code.split("\n").length;
   return (
     <button
       onClick={() => onOpen(artifact.id)}
-      className={`w-full max-w-[420px] flex items-center gap-3 rounded-[12px] border px-3.5 py-2.5 my-1 text-left transition group ${
+      className={`w-full max-w-[420px] flex items-center gap-3 rounded-[12px] border px-3.5 py-2.5 my-1 text-left transition-all duration-200 group artifact-card-in ${
         isActive
           ? "border-macblue/40 bg-macblue/[0.06]"
           : "border-macborder bg-white/70 hover:bg-white/95"
       }`}
     >
-      <div className="w-9 h-9 rounded-[9px] bg-macink/[0.06] flex items-center justify-center shrink-0 text-macink">
+      <div className="w-9 h-9 rounded-[9px] bg-macink/[0.06] flex items-center justify-center shrink-0 text-macink relative">
         <FileIcon ext={artifact.ext} />
+        {artifact.streaming && (
+          <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-macgreen pulse-dot border border-white" />
+        )}
       </div>
       <div className="flex-1 min-w-0">
         <div className="text-[13px] font-medium text-macink truncate">{artifact.title}</div>
-        <div className="text-[11.5px] text-macsub">
-          {artifact.label} · {lineCount} {lineCount === 1 ? "regel" : "regels"}
+        <div className="text-[11.5px] text-macsub flex items-center gap-1.5">
+          {artifact.streaming ? (
+            <span className="text-macgreen">Wordt geschreven…</span>
+          ) : (
+            <>
+              {artifact.label} · {lineCount} {lineCount === 1 ? "regel" : "regels"}
+            </>
+          )}
         </div>
       </div>
-      <div className="text-macsub group-hover:text-macblue transition shrink-0">
+      <div className="text-macsub group-hover:text-macblue transition-colors shrink-0">
         <ChevronIcon />
       </div>
     </button>
@@ -35,24 +48,35 @@ export function ArtifactCard({ artifact, onOpen, isActive }) {
 /**
  * Het volledige paneel (split-view naast de chat), met titlebar in macOS-stijl,
  * Preview/Code tabs voor HTML, en alleen Code voor andere talen.
+ *
+ * Versleepbaar (feature 13): een handle aan de linkerrand laat de breedte
+ * aanpassen, net als een editor-paneel. De gekozen breedte wordt onthouden
+ * via de `onResize` callback (App.jsx slaat 'm op in localStorage).
  */
-export default function ArtifactPanel({ artifact, onClose }) {
+export default function ArtifactPanel({ artifact, onClose, width = 440, onResize }) {
   const isHtml = isHtmlArtifact(artifact);
   const [tab, setTab] = useState(isHtml ? "preview" : "code");
   const [copied, setCopied] = useState(false);
   const iframeRef = useRef(null);
+  const codeScrollRef = useRef(null);
+  const draggingRef = useRef(false);
 
   useEffect(() => {
     setTab(isHtml ? "preview" : "code");
   }, [artifact.id, isHtml]);
 
+  // Tijdens live streaming: automatisch meescrollen in de code-tab zodat de
+  // nieuwste regels zichtbaar blijven (feature 2 + 3).
+  useEffect(() => {
+    if (artifact.streaming && tab === "code" && codeScrollRef.current) {
+      codeScrollRef.current.scrollTop = codeScrollRef.current.scrollHeight;
+    }
+  }, [artifact.code, artifact.streaming, tab]);
+
   const srcDoc = useMemo(() => {
     if (!isHtml) return "";
     const code = artifact.code;
-    // Als het al een volledig document is (heeft <html>), gebruik het direct.
     if (/<html[\s>]/i.test(code)) return code;
-    // Anders wikkelen we het in een minimale pagina zodat losse HTML-snippets
-    // ook netjes renderen (met een basis font zodat het er verzorgd uitziet).
     return `<!doctype html><html><head><meta charset="utf-8"><style>
       body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;margin:16px;color:#1d1d1f;}
     </style></head><body>${code}</body></html>`;
@@ -85,23 +109,66 @@ export default function ArtifactPanel({ artifact, onClose }) {
     }
   }
 
+  const handlePointerDown = useCallback(
+    (e) => {
+      e.preventDefault();
+      draggingRef.current = true;
+      const startX = e.clientX;
+      const startWidth = width;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+
+      function handleMove(ev) {
+        if (!draggingRef.current) return;
+        // Het paneel zit rechts, dus naar links slepen (negatieve dx) maakt
+        // het breder.
+        const dx = startX - ev.clientX;
+        const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + dx));
+        onResize?.(next);
+      }
+      function handleUp() {
+        draggingRef.current = false;
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        window.removeEventListener("pointermove", handleMove);
+        window.removeEventListener("pointerup", handleUp);
+      }
+      window.addEventListener("pointermove", handleMove);
+      window.addEventListener("pointerup", handleUp);
+    },
+    [width, onResize]
+  );
+
   return (
-    <div className="w-[440px] h-full border-l border-macborder bg-macpanel2 flex flex-col mac-window-in shrink-0">
+    <div
+      className="h-full border-l border-macborder bg-macpanel2 flex flex-col mac-window-in shrink-0 relative"
+      style={{ width }}
+    >
+      {/* Sleep-handle */}
+      <div
+        onPointerDown={handlePointerDown}
+        title="Sleep om breedte aan te passen"
+        className="absolute left-0 top-0 h-full w-[6px] -translate-x-1/2 cursor-col-resize group z-10 flex items-center justify-center"
+      >
+        <div className="w-[3px] h-16 rounded-full bg-macborder group-hover:bg-macblue/50 transition-colors" />
+      </div>
+
       {/* Titlebar */}
       <div className="h-11 flex items-center px-3 gap-2 border-b border-macborder shrink-0">
         <div className="flex gap-2">
           <button
             onClick={onClose}
-            className="w-3 h-3 rounded-full bg-macred hover:opacity-70 transition"
+            className="w-3 h-3 rounded-full bg-macred hover:opacity-70 transition-opacity"
             title="Sluiten"
           />
           <span className="w-3 h-3 rounded-full bg-macyellow" />
           <span className="w-3 h-3 rounded-full bg-macgreen" />
         </div>
-        <div className="flex-1 text-center text-[12.5px] font-medium text-macsub truncate px-2">
+        <div className="flex-1 text-center text-[12.5px] font-medium text-macsub truncate px-2 flex items-center justify-center gap-1.5">
           {artifact.title}
+          {artifact.streaming && <span className="w-1.5 h-1.5 rounded-full bg-macgreen pulse-dot shrink-0" />}
         </div>
-        <div className="w-[42px]" /> {/* balans voor de traffic lights links */}
+        <div className="w-[42px]" />
       </div>
 
       {/* Tabs + acties */}
@@ -120,7 +187,7 @@ export default function ArtifactPanel({ artifact, onClose }) {
         )}
 
         <div className="flex items-center gap-1">
-          {isHtml && tab === "preview" && (
+          {isHtml && tab === "preview" && !artifact.streaming && (
             <IconButton title="Vernieuwen" onClick={handleRefresh}>
               <RefreshIcon />
             </IconButton>
@@ -136,7 +203,7 @@ export default function ArtifactPanel({ artifact, onClose }) {
 
       {/* Content */}
       <div className="flex-1 overflow-hidden">
-        {isHtml && tab === "preview" ? (
+        {isHtml && tab === "preview" && !artifact.streaming ? (
           <iframe
             ref={iframeRef}
             srcDoc={srcDoc}
@@ -144,9 +211,18 @@ export default function ArtifactPanel({ artifact, onClose }) {
             sandbox="allow-scripts allow-forms allow-popups allow-modals"
             className="w-full h-full bg-white border-0"
           />
+        ) : isHtml && tab === "preview" && artifact.streaming ? (
+          <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-macsub text-[12.5px]">
+            <span className="w-2 h-2 rounded-full bg-macgreen pulse-dot" />
+            Live preview verschijnt zodra het bestand klaar is
+          </div>
         ) : (
-          <pre className="w-full h-full overflow-auto mac-scroll p-4 text-[12.5px] leading-relaxed font-mono bg-[#1d1d1f] text-[#f5f5f7] m-0">
+          <pre
+            ref={codeScrollRef}
+            className="w-full h-full overflow-auto mac-scroll p-4 text-[12.5px] leading-relaxed font-mono bg-[#1d1d1f] text-[#f5f5f7] m-0"
+          >
             <code>{artifact.code}</code>
+            {artifact.streaming && <span className="typing-caret" />}
           </pre>
         )}
       </div>
@@ -158,7 +234,7 @@ function TabButton({ active, children, onClick }) {
   return (
     <button
       onClick={onClick}
-      className={`px-3 h-7 rounded-[7px] text-[12.5px] font-medium transition ${
+      className={`px-3 h-7 rounded-[7px] text-[12.5px] font-medium transition-all duration-150 ${
         active ? "bg-white shadow-sm text-macink" : "text-macsub hover:text-macink"
       }`}
     >
@@ -172,7 +248,7 @@ function IconButton({ children, onClick, title }) {
     <button
       onClick={onClick}
       title={title}
-      className="w-7 h-7 rounded-[7px] flex items-center justify-center text-macsub hover:bg-black/[0.06] hover:text-macink transition"
+      className="w-7 h-7 rounded-[7px] flex items-center justify-center text-macsub hover:bg-black/[0.06] hover:text-macink transition-all duration-150"
     >
       {children}
     </button>

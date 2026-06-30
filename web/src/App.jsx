@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useAuth } from "./lib/auth.jsx";
 import LoginScreen from "./components/LoginScreen.jsx";
 import NoAccessScreen from "./components/NoAccessScreen.jsx";
@@ -13,10 +13,9 @@ import {
   deleteChat,
   touchChat,
   renameChat,
-  addMessage,
-  updateMessage
+  addMessage
 } from "./lib/chats.js";
-import { streamChat } from "./lib/stream.js";
+import { streamChat, buildResumeMessages, generateChatTitle } from "./lib/stream.js";
 import { extractArtifacts } from "./lib/artifacts.js";
 
 export default function App() {
@@ -41,11 +40,40 @@ function MainApp({ uid, email }) {
   const [messages, setMessages] = useState([]);
   const [streaming, setStreaming] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [reconnecting, setReconnecting] = useState(null); // { attempt, max } | null
+
+  // Live token-usage van de huidige/laatste stream, voor de tracker in Settings.
+  const [tokenUsage, setTokenUsage] = useState({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
 
   // Per actief bericht houden we de losse artifacts bij, zodat de
   // ArtifactCard/Panel weet welke code-blokken erbij horen.
   const [artifactsByMessage, setArtifactsByMessage] = useState({});
   const [openArtifact, setOpenArtifact] = useState(null); // { messageId, artifactId }
+
+  // Breedte van het Artifact-paneel, versleepbaar en onthouden (feature 13).
+  const [artifactPanelWidth, setArtifactPanelWidth] = useState(() => {
+    const stored = Number(localStorage.getItem("tygoai:artifactPanelWidth"));
+    return Number.isFinite(stored) && stored >= 320 && stored <= 900 ? stored : 440;
+  });
+
+  // Houdt de actieve AbortController bij zodat de Stop-knop de juiste stream
+  // kan afbreken (feature 8).
+  const abortRef = useRef(null);
+
+  // Bewaart per chat het laatst gestopte (nog niet afgeronde) antwoord, zodat
+  // "Doorgaan met dit bericht" daarna verder kan zonder iets opnieuw te
+  // versturen of te dupliceren (features 4 + 5). Dit leeft BEWUST alleen in
+  // het geheugen van de browser-tab — niet in Firestore — om de
+  // Firestore-opslag niet onnodig te laten groeien. Dat betekent ook: bij het
+  // verversen/sluiten van de pagina gaat een gestopt antwoord verloren.
+  const stoppedDraftsRef = useRef({}); // { [chatId]: { history, partialContent, partialReasoning } }
+  // stoppedVersion is GEEN inhoudelijke state -- het bestaat alleen om React
+  // te dwingen opnieuw te renderen zodra stoppedDraftsRef.current muteert
+  // (een ref-mutatie triggert zelf geen render). canResume leest vervolgens
+  // altijd direct uit de ref, gekoppeld aan de huidige activeChatId, zodat
+  // het wisselen tussen chats en teruggaan de juiste knop-status toont.
+  const [, setStoppedVersion] = useState(0);
+  const bumpStoppedVersion = () => setStoppedVersion((v) => v + 1);
 
   // --- Chats ophalen/luisteren ---
   useEffect(() => {
@@ -89,6 +117,7 @@ function MainApp({ uid, email }) {
 
   async function handleDeleteChat(id) {
     await deleteChat(uid, id);
+    delete stoppedDraftsRef.current[id];
     if (activeChatId === id) {
       setActiveChatId(null);
       setOpenArtifact(null);
@@ -97,7 +126,6 @@ function MainApp({ uid, email }) {
 
   const handleOpenArtifact = useCallback(
     (artifactId) => {
-      // Zoek bij welk bericht dit artifact hoort
       for (const [messageId, arts] of Object.entries(artifactsByMessage)) {
         if (arts.some((a) => a.id === artifactId)) {
           setOpenArtifact({ messageId, artifactId });
@@ -108,41 +136,24 @@ function MainApp({ uid, email }) {
     [artifactsByMessage]
   );
 
-  async function handleSend(text) {
-    let chatId = activeChatId;
-    if (!chatId) {
-      chatId = await createChat(uid, text.slice(0, 40));
-      setActiveChatId(chatId);
-    } else if (messages.length === 0) {
-      renameChat(uid, chatId, text.slice(0, 40));
-    }
+  function handleArtifactPanelResize(newWidth) {
+    setArtifactPanelWidth(newWidth);
+    localStorage.setItem("tygoai:artifactPanelWidth", String(newWidth));
+  }
 
-    const userMsg = { role: "user", content: text };
-    await addMessage(uid, chatId, userMsg);
-    await touchChat(uid, chatId);
+  /**
+   * Start een streaming-call en houdt alle live state (content, reasoning,
+   * artifacts, token-usage) bij. Wordt gebruikt zowel voor nieuwe berichten
+   * als voor "Doorgaan met dit bericht".
+   */
+  function runStream({ chatId, requestMessages, localId, seedContent = "", seedReasoning = "", generateTitleAfter = null }) {
+    let liveContent = seedContent;
+    let liveReasoning = seedReasoning;
 
-    const history = [...messages, userMsg]
-      .filter((m) => !m.streaming)
-      .map((m) => ({ role: m.role, content: m.content }));
-
-    const localId = "streaming-" + Date.now();
-    let liveContent = "";
-    let liveReasoning = "";
-
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: localId,
-        role: "assistant",
-        content: "",
-        reasoning: "",
-        reasoningStreaming: true,
-        streaming: true
-      }
-    ]);
     setStreaming(true);
+    setReconnecting(null);
 
-    streamChat(history, {
+    const { abort } = streamChat(requestMessages, {
       onChunk: (type, text) => {
         if (type === "reasoning") {
           liveReasoning += text;
@@ -162,9 +173,38 @@ function MainApp({ uid, email }) {
           )
         );
       },
-      onDone: async () => {
+      onUsage: (usage) => {
+        setTokenUsage(usage);
+      },
+      onReconnecting: (info) => {
+        setReconnecting(info);
+      },
+      onDone: async (info) => {
         setStreaming(false);
-        const { cleanText, artifacts } = extractArtifacts(liveContent);
+        setReconnecting(null);
+        abortRef.current = null;
+
+        if (info?.stopped) {
+          // Bewaar de voortgang zodat "Doorgaan met dit bericht" hem kan
+          // hervatten. We laten het lokale streaming-bericht gewoon staan
+          // (niet-streaming) zodat de gebruiker meteen ziet wat er al was.
+          stoppedDraftsRef.current[chatId] = {
+            history: requestMessages,
+            partialContent: liveContent,
+            partialReasoning: liveReasoning
+          };
+          bumpStoppedVersion();
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === localId
+                ? { ...m, streaming: false, reasoningStreaming: false, stoppedHere: true }
+                : m
+            )
+          );
+          return;
+        }
+
+        const { cleanText, artifacts } = extractArtifacts(liveContent, localId);
         const savedId = await addMessage(uid, chatId, {
           role: "assistant",
           content: cleanText,
@@ -176,9 +216,22 @@ function MainApp({ uid, email }) {
         }
         await touchChat(uid, chatId);
         setMessages((prev) => prev.filter((m) => m.id !== localId));
+        delete stoppedDraftsRef.current[chatId];
+        bumpStoppedVersion();
+
+        // Auto-titel (feature 14): vervangt de afgekapte placeholder-titel
+        // door een korte, AI-gegenereerde titel op basis van het eerste
+        // vraag/antwoord-paar. Gebeurt op de achtergrond, blokkeert niets.
+        if (generateTitleAfter) {
+          generateChatTitle(generateTitleAfter, cleanText).then((title) => {
+            if (title) renameChat(uid, chatId, title);
+          });
+        }
       },
       onError: async (err) => {
         setStreaming(false);
+        setReconnecting(null);
+        abortRef.current = null;
         setMessages((prev) =>
           prev.map((m) =>
             m.id === localId
@@ -192,6 +245,90 @@ function MainApp({ uid, email }) {
           )
         );
       }
+    });
+
+    abortRef.current = abort;
+  }
+
+  async function handleSend(text, images = []) {
+    let chatId = activeChatId;
+    const isFirstMessage = messages.length === 0;
+    if (!chatId) {
+      chatId = await createChat(uid, (text || "Afbeelding").slice(0, 40));
+      setActiveChatId(chatId);
+    } else if (isFirstMessage) {
+      renameChat(uid, chatId, (text || "Afbeelding").slice(0, 40));
+    }
+
+    const userMsg = {
+      role: "user",
+      content: text,
+      images: images.length ? images : null
+    };
+    await addMessage(uid, chatId, userMsg);
+    await touchChat(uid, chatId);
+
+    // Voor het model: berichten met afbeeldingen krijgen het multimodale
+    // content-formaat (array van text/image_url-delen), zoals het model
+    // (Nemotron Omni) verwacht. Berichten zonder afbeelding blijven gewoon
+    // platte tekst, voor compatibiliteit met de rest van de geschiedenis.
+    function toModelMessage(m) {
+      if (m.images && m.images.length) {
+        const parts = [];
+        if (m.content) parts.push({ type: "text", text: m.content });
+        for (const src of m.images) {
+          parts.push({ type: "image_url", image_url: { url: src } });
+        }
+        return { role: m.role, content: parts };
+      }
+      return { role: m.role, content: m.content };
+    }
+
+    const history = [...messages, userMsg].filter((m) => !m.streaming).map(toModelMessage);
+
+    const localId = "streaming-" + Date.now();
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: localId,
+        role: "assistant",
+        content: "",
+        reasoning: "",
+        reasoningStreaming: true,
+        streaming: true
+      }
+    ]);
+
+    runStream({ chatId, requestMessages: history, localId, generateTitleAfter: isFirstMessage ? text || "Afbeelding" : null });
+  }
+
+  function handleStop() {
+    abortRef.current?.();
+  }
+
+  function handleResume() {
+    if (!activeChatId) return;
+    const draft = stoppedDraftsRef.current[activeChatId];
+    if (!draft) return;
+
+    const localId = messages.find((m) => m.stoppedHere)?.id || "streaming-" + Date.now();
+    const resumeMessages = buildResumeMessages(draft.history, draft.partialContent);
+
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === localId
+          ? { ...m, streaming: true, reasoningStreaming: false, stoppedHere: false }
+          : m
+      )
+    );
+
+    runStream({
+      chatId: activeChatId,
+      requestMessages: resumeMessages,
+      localId,
+      seedContent: draft.partialContent,
+      seedReasoning: draft.partialReasoning
     });
   }
 
@@ -209,13 +346,22 @@ function MainApp({ uid, email }) {
     });
   }, [messages]);
 
-  // Live artifacts tijdens streaming ook al beschikbaar maken voor de kaartjes
+  // Live artifacts tijdens streaming ook al beschikbaar maken voor de
+  // kaartjes EN voor het Artifact-paneel, ook terwijl het codeblok nog open
+  // is (feature 2: artifact verschijnt direct, niet pas na afronding).
   useEffect(() => {
     const streamingMsg = messages.find((m) => m.streaming);
     if (!streamingMsg) return;
-    const { artifacts } = extractArtifacts(streamingMsg.content || "");
+    const { artifacts } = extractArtifacts(streamingMsg.content || "", streamingMsg.id);
     if (artifacts.length) {
       setArtifactsByMessage((prev) => ({ ...prev, [streamingMsg.id]: artifacts }));
+      // Open automatisch het paneel zodra het eerste codeblok van dit
+      // bericht begint, zodat de gebruiker de code live zie meegroeien.
+      setOpenArtifact((prevOpen) => {
+        if (prevOpen && prevOpen.messageId === streamingMsg.id) return prevOpen;
+        if (prevOpen) return prevOpen; // gebruiker keek al iets anders na, niet wegkapen
+        return { messageId: streamingMsg.id, artifactId: artifacts[artifacts.length - 1].id };
+      });
     }
   }, [messages]);
 
@@ -223,10 +369,8 @@ function MainApp({ uid, email }) {
     if (m.role !== "assistant") return m;
     const arts = artifactsByMessage[m.id];
     if (!arts) return m;
-    // Voor opgeslagen berichten staat content al "clean" (placeholders).
-    // Voor streaming berichten moeten we elke render opnieuw extraheren.
-    if (m.streaming) {
-      const { cleanText } = extractArtifacts(m.content || "");
+    if (m.streaming || m.stoppedHere) {
+      const { cleanText } = extractArtifacts(m.content || "", m.id);
       return { ...m, content: cleanText, artifacts: arts };
     }
     return { ...m, artifacts: arts };
@@ -236,6 +380,13 @@ function MainApp({ uid, email }) {
   const activeArtifactObj = openArtifact
     ? artifactsByMessage[openArtifact.messageId]?.find((a) => a.id === openArtifact.artifactId)
     : null;
+
+  // canResume kijkt naar het draft van de ACTIEVE chat specifiek, niet naar
+  // welke chat het laatst gestopt is — anders zou de knop verkeerd verdwijnen
+  // als je na het stoppen even naar een andere chat wisselt en teruggaat.
+  // stoppedVersion (zie hierboven) dient alleen om een re-render te forceren
+  // zodra een draft wijzigt (een ref-mutatie alleen triggert geen render).
+  const canResume = !streaming && !!stoppedDraftsRef.current[activeChatId];
 
   return (
     <div className="h-screen w-screen flex overflow-hidden p-3 gap-0">
@@ -249,21 +400,33 @@ function MainApp({ uid, email }) {
           onOpenSettings={() => setShowSettings(true)}
           onLogout={logout}
           userEmail={email}
+          uid={uid}
         />
         <ChatWindow
           messages={messagesWithCleanContent}
           onSend={handleSend}
           streaming={streaming}
+          reconnecting={reconnecting}
           chatTitle={activeChat?.title}
           onOpenArtifact={handleOpenArtifact}
           activeArtifactId={openArtifact?.artifactId}
+          onStop={handleStop}
+          canResume={canResume}
+          onResume={handleResume}
         />
         {activeArtifactObj && (
-          <ArtifactPanel artifact={activeArtifactObj} onClose={() => setOpenArtifact(null)} />
+          <ArtifactPanel
+            artifact={activeArtifactObj}
+            onClose={() => setOpenArtifact(null)}
+            width={artifactPanelWidth}
+            onResize={handleArtifactPanelResize}
+          />
         )}
       </div>
 
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <SettingsModal onClose={() => setShowSettings(false)} tokenUsage={tokenUsage} />
+      )}
     </div>
   );
 }

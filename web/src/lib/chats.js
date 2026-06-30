@@ -4,6 +4,8 @@ import {
   doc,
   setDoc,
   deleteDoc,
+  getDocs,
+  limit,
   onSnapshot,
   orderBy,
   query,
@@ -32,6 +34,18 @@ export function listenToMessages(uid, chatId, callback) {
   return onSnapshot(q, (snap) => {
     callback(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
   });
+}
+
+/**
+ * Eenmalige (niet-live) ophaling van berichten van één chat, gebruikt door de
+ * zoekbalk in de sidebar om ook op inhoud te kunnen filteren (feature 12).
+ * Limiet van 200 berichten per chat is ruim voldoende voor een 1-persoons
+ * Spark-plan-app en voorkomt onnodig grote reads bij zeer lange gesprekken.
+ */
+export async function fetchMessagesOnce(uid, chatId) {
+  const q = query(messagesRef(uid, chatId), orderBy("createdAt", "asc"), limit(200));
+  const snap = await getDocs(q);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
 export async function createChat(uid, title = "Nieuwe chat") {

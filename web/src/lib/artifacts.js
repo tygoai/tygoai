@@ -1,8 +1,18 @@
 // -----------------------------------------------------------------------------
 // Detecteert ```taal ... ``` codeblokken in de tekst van het model en haalt ze
 // eruit als losse "artifacts" (bestanden), zodat ze niet als platte tekst in
-// de chatbubble verschijnen maar als een apart bestand-kaartje (zoals Claude
-// Artifacts). De rest van de tekst blijft normale markdown.
+// de chatbubble verschijnen maar als een apart bestand-kaartje/paneel.
+//
+// BELANGRIJK (feature 2 + 3): een codeblok wordt nu OOK herkend zolang het nog
+// open is (de afsluitende ``` is nog niet binnengekomen). Zo'n artifact krijgt
+// streaming: true. Hierdoor opent het Artifact-paneel al zodra het model begint
+// met ```html, ```js, ```tsx etc., en blijft de inhoud live bijgewerkt worden
+// terwijl er nog tokens binnenkomen — net zoals tijdens het "doorschrijven"
+// totdat de code af is of de tokenlimiet bereikt wordt.
+//
+// IDs zijn gebaseerd op de positie van het codeblok in de tekst (1e blok,
+// 2e blok, ...) zodat ze stabiel blijven tussen renders tijdens streaming.
+// Dat voorkomt dat React-componenten steeds opnieuw mounten/flikkeren.
 // -----------------------------------------------------------------------------
 
 const LANG_TO_EXT = {
@@ -43,49 +53,79 @@ const LANG_LABEL = {
   yaml: "YAML"
 };
 
-let counter = 0;
-
 /**
- * Haalt volledige codeblokken (``` ... ```) uit de tekst.
+ * Haalt codeblokken (``` ... ```) uit de tekst — zowel afgesloten blokken als
+ * een eventueel nog open blok aan het eind van de tekst (tijdens streaming).
+ *
  * Retourneert { cleanText, artifacts } waarbij cleanText de tekst is met de
  * codeblokken vervangen door een placeholder, en artifacts een array van
- * { id, lang, ext, label, code, title }.
+ * { id, lang, ext, label, code, title, streaming }.
  *
- * Werkt ook met streaming tekst: een nog niet afgesloten codeblok aan het
- * einde van de tekst wordt NIET als artifact geëxtraheerd totdat het sluit,
- * zodat er geen halve/flikkerende artifacts ontstaan tijdens het typen.
+ * @param {string} text
+ * @param {string} [messageKey] - unieke sleutel van het bericht (bijv. message id), gebruikt om artifact-IDs stabiel en uniek per bericht te maken
  */
-export function extractArtifacts(text, existingArtifacts = []) {
+export function extractArtifacts(text, messageKey = "msg") {
   if (!text) return { cleanText: "", artifacts: [] };
 
-  const fenceRegex = /```([a-zA-Z0-9]*)\n([\s\S]*?)```/g;
+  // Vindt alle ``` markers (zowel openend als sluitend) op volgorde.
+  const fenceMarkerRegex = /```([a-zA-Z0-9]*)\n?/g;
+
   const artifacts = [];
   let cleanText = "";
   let lastIndex = 0;
-  let match;
   let idx = 0;
 
-  while ((match = fenceRegex.exec(text)) !== null) {
-    cleanText += text.slice(lastIndex, match.index);
-    const rawLang = (match[1] || "").toLowerCase();
-    const code = match[2];
-    const ext = LANG_TO_EXT[rawLang] || (rawLang || "txt");
-    const label = LANG_LABEL[ext] || rawLang.toUpperCase() || "Code";
+  // We lopen handmatig door de tekst en houden bij of we "binnen" een
+  // codeblok zitten, zodat we ook een niet-afgesloten laatste blok kunnen
+  // herkennen.
+  const fenceIndices = [];
+  let m;
+  while ((m = fenceMarkerRegex.exec(text)) !== null) {
+    fenceIndices.push({ index: m.index, end: fenceMarkerRegex.lastIndex, lang: (m[1] || "").toLowerCase() });
+  }
 
-    const existing = existingArtifacts[idx];
-    const id = existing?.id || `artifact-${++counter}`;
+  let i = 0;
+  while (i < fenceIndices.length) {
+    const open = fenceIndices[i];
+    cleanText += text.slice(lastIndex, open.index);
 
-    artifacts.push({
-      id,
-      lang: rawLang,
-      ext,
-      label,
-      code,
-      title: guessTitle(code, ext, label)
-    });
+    const closing = fenceIndices[i + 1];
+    const ext = LANG_TO_EXT[open.lang] || (open.lang || "txt");
+    const label = LANG_LABEL[ext] || open.lang.toUpperCase() || "Code";
+    const id = `${messageKey}-artifact-${idx}`;
 
-    cleanText += `\n[[ARTIFACT:${id}]]\n`;
-    lastIndex = fenceRegex.lastIndex;
+    if (closing) {
+      // Afgesloten codeblok.
+      const code = text.slice(open.end, closing.index).replace(/\n$/, "");
+      artifacts.push({
+        id,
+        lang: open.lang,
+        ext,
+        label,
+        code,
+        title: guessTitle(code, ext, label),
+        streaming: false
+      });
+      cleanText += `\n[[ARTIFACT:${id}]]\n`;
+      lastIndex = closing.end;
+      i += 2;
+    } else {
+      // Nog open codeblok: alles tot het einde van de tekst is de
+      // (nog groeiende) code. Dit is het live-streaming artifact.
+      const code = text.slice(open.end);
+      artifacts.push({
+        id,
+        lang: open.lang,
+        ext,
+        label,
+        code,
+        title: guessTitle(code, ext, label),
+        streaming: true
+      });
+      cleanText += `\n[[ARTIFACT:${id}]]\n`;
+      lastIndex = text.length;
+      i += 1;
+    }
     idx++;
   }
 

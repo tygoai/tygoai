@@ -99,3 +99,56 @@ body {
   text-decoration: none;
 }
 .prose-mac a:hover { text-decoration: underline; }
+
+/* ---------------------------------------------------------------------------
+ * Extra animaties door de hele app (feature 11): berichten, sidebar-items,
+ * artifact-kaartjes en de instellingen-modal krijgen een zachte, vloeiende
+ * intro-animatie zodra ze verschijnen, vergelijkbaar met native macOS-apps.
+ * ------------------------------------------------------------------------- */
+
+@keyframes msg-in {
+  0% { opacity: 0; transform: translateY(6px) scale(0.985); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+.msg-in {
+  animation: msg-in 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes fade-in-up {
+  0% { opacity: 0; transform: translateY(4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+.fade-in-up {
+  animation: fade-in-up 0.22s ease-out;
+}
+
+@keyframes sidebar-item-in {
+  0% { opacity: 0; transform: translateX(-4px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+.sidebar-item-in {
+  animation: sidebar-item-in 0.2s ease-out;
+}
+
+@keyframes artifact-card-in {
+  0% { opacity: 0; transform: scale(0.97); }
+  100% { opacity: 1; transform: scale(1); }
+}
+.artifact-card-in {
+  animation: artifact-card-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes modal-backdrop-in {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+.modal-backdrop-in {
+  animation: modal-backdrop-in 0.18s ease-out;
+}
+
+/* Zachte transitie wanneer het Artifact-paneel breder/smaller wordt versleept
+ * (feature 13) -- alleen toegepast als er niet actief gesleept wordt, anders
+ * voelt het slepen vertraagd aan. */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
