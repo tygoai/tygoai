@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { isHtmlArtifact } from "../lib/artifacts.js";
+import { isHtmlArtifact, isDocumentArtifact } from "../lib/artifacts.js";
 
 const MIN_WIDTH = 320;
 const MAX_WIDTH = 900;
@@ -8,12 +8,38 @@ const MAX_WIDTH = 900;
  * Klein kaartje dat in de chatbubble verschijnt op de plek van een codeblok.
  * Klikken opent het volledige ArtifactPanel ernaast. Tijdens streaming
  * toont het kaartje een live-indicator (feature 2).
+ *
+ * Voor document-artifacts (```docx/```pptx/```xlsx, feature 5/bug 5):
+ * klikken downloadt direct het echte Word/PowerPoint/Excel-bestand, in
+ * plaats van een code-paneel te openen — net zoals bij een .py-bestand,
+ * maar dan met een passende download-actie.
  */
 export function ArtifactCard({ artifact, onOpen, isActive }) {
+  const [downloading, setDownloading] = useState(false);
   const lineCount = artifact.code.split("\n").length;
+  const isDoc = isDocumentArtifact(artifact);
+
+  async function handleClick() {
+    if (artifact.streaming) return;
+    if (!isDoc) {
+      onOpen(artifact.id);
+      return;
+    }
+    setDownloading(true);
+    try {
+      const exportLib = await import("../lib/exportDoc.js");
+      const title = artifact.title || "TygoAI-document";
+      if (artifact.ext === "docx") await exportLib.exportToDocx(title, artifact.code);
+      else if (artifact.ext === "pptx") await exportLib.exportToPptx(title, artifact.code);
+      else if (artifact.ext === "xlsx") exportLib.exportToXlsx(title, artifact.code);
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   return (
     <button
-      onClick={() => onOpen(artifact.id)}
+      onClick={handleClick}
       className={`w-full max-w-[420px] flex items-center gap-3 rounded-[12px] border px-3.5 py-2.5 my-1 text-left transition-all duration-200 group artifact-card-in ${
         isActive
           ? "border-macblue/40 bg-macblue/[0.06]"
@@ -31,6 +57,8 @@ export function ArtifactCard({ artifact, onOpen, isActive }) {
         <div className="text-[11.5px] text-macsub flex items-center gap-1.5">
           {artifact.streaming ? (
             <span className="text-macgreen">Wordt geschreven…</span>
+          ) : isDoc ? (
+            downloading ? "Bestand maken…" : `${artifact.label} · klik om te downloaden`
           ) : (
             <>
               {artifact.label} · {lineCount} {lineCount === 1 ? "regel" : "regels"}
@@ -39,7 +67,7 @@ export function ArtifactCard({ artifact, onOpen, isActive }) {
         </div>
       </div>
       <div className="text-macsub group-hover:text-macblue transition-colors shrink-0">
-        <ChevronIcon />
+        {isDoc ? <DownloadGlyphIcon /> : <ChevronIcon />}
       </div>
     </button>
   );
@@ -53,7 +81,7 @@ export function ArtifactCard({ artifact, onOpen, isActive }) {
  * aanpassen, net als een editor-paneel. De gekozen breedte wordt onthouden
  * via de `onResize` callback (App.jsx slaat 'm op in localStorage).
  */
-export default function ArtifactPanel({ artifact, onClose, width = 440, onResize }) {
+export default function ArtifactPanel({ artifact, onClose, width = 440, onResize, isMobile = false }) {
   const isHtml = isHtmlArtifact(artifact);
   const [tab, setTab] = useState(isHtml ? "preview" : "code");
   const [copied, setCopied] = useState(false);
@@ -141,29 +169,44 @@ export default function ArtifactPanel({ artifact, onClose, width = 440, onResize
 
   return (
     <div
-      className="h-full border-l border-macborder bg-macpanel2 flex flex-col mac-window-in shrink-0 relative"
-      style={{ width }}
+      className={
+        isMobile
+          ? "fixed inset-0 z-50 bg-macpanel2 flex flex-col mac-window-in"
+          : "h-full border-l border-macborder bg-macpanel2 flex flex-col mac-window-in shrink-0 relative"
+      }
+      style={isMobile ? undefined : { width }}
     >
-      {/* Sleep-handle */}
-      <div
-        onPointerDown={handlePointerDown}
-        title="Sleep om breedte aan te passen"
-        className="absolute left-0 top-0 h-full w-[6px] -translate-x-1/2 cursor-col-resize group z-10 flex items-center justify-center"
-      >
-        <div className="w-[3px] h-16 rounded-full bg-macborder group-hover:bg-macblue/50 transition-colors" />
-      </div>
+      {/* Sleep-handle: alleen op desktop zinvol, niets om tegenaan te slepen op mobiel fullscreen. */}
+      {!isMobile && (
+        <div
+          onPointerDown={handlePointerDown}
+          title="Sleep om breedte aan te passen"
+          className="absolute left-0 top-0 h-full w-[6px] -translate-x-1/2 cursor-col-resize group z-10 flex items-center justify-center"
+        >
+          <div className="w-[3px] h-16 rounded-full bg-macborder group-hover:bg-macblue/50 transition-colors" />
+        </div>
+      )}
 
       {/* Titlebar */}
       <div className="h-11 flex items-center px-3 gap-2 border-b border-macborder shrink-0">
-        <div className="flex gap-2">
+        {isMobile ? (
           <button
             onClick={onClose}
-            className="w-3 h-3 rounded-full bg-macred hover:opacity-70 transition-opacity"
-            title="Sluiten"
-          />
-          <span className="w-3 h-3 rounded-full bg-macyellow" />
-          <span className="w-3 h-3 rounded-full bg-macgreen" />
-        </div>
+            className="flex items-center gap-1 text-[13px] text-macblue"
+          >
+            <BackIcon /> Terug
+          </button>
+        ) : (
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              className="w-3 h-3 rounded-full bg-macred hover:opacity-70 transition-opacity"
+              title="Sluiten"
+            />
+            <span className="w-3 h-3 rounded-full bg-macyellow" />
+            <span className="w-3 h-3 rounded-full bg-macgreen" />
+          </div>
+        )}
         <div className="flex-1 text-center text-[12.5px] font-medium text-macsub truncate px-2 flex items-center justify-center gap-1.5">
           {artifact.title}
           {artifact.streaming && <span className="w-1.5 h-1.5 rounded-full bg-macgreen pulse-dot shrink-0" />}
@@ -272,7 +315,10 @@ function FileIcon({ ext }) {
     md: "#1D1D1F",
     sh: "#1D1D1F",
     sql: "#8E8E93",
-    yaml: "#8E8E93"
+    yaml: "#8E8E93",
+    docx: "#2B579A",
+    pptx: "#D24726",
+    xlsx: "#217346"
   };
   const color = colors[ext] || "#8E8E93";
   return (
@@ -289,6 +335,28 @@ function FileIcon({ ext }) {
         strokeLinejoin="round"
       />
       <path d="M15 2v5h5" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function BackIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+      <path d="M15 18l-6-6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function DownloadGlyphIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+      <path
+        d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }

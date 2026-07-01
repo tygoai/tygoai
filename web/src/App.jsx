@@ -6,6 +6,8 @@ import Sidebar from "./components/Sidebar.jsx";
 import ChatWindow from "./components/ChatWindow.jsx";
 import SettingsModal from "./components/SettingsModal.jsx";
 import ArtifactPanel from "./components/ArtifactPanel.jsx";
+import AdminPanel from "./components/AdminPanel.jsx";
+import { sendNotificationToAdmin } from "./lib/admin.js";
 import {
   listenToChats,
   listenToMessages,
@@ -19,7 +21,7 @@ import { streamChat, buildResumeMessages, generateChatTitle } from "./lib/stream
 import { extractArtifacts } from "./lib/artifacts.js";
 
 export default function App() {
-  const { user, isAllowed } = useAuth();
+  const { user, isAllowed, accountStatus } = useAuth();
 
   if (user === undefined) {
     return <LoadingScreen />;
@@ -28,19 +30,23 @@ export default function App() {
     return <LoginScreen />;
   }
   if (!isAllowed) {
-    return <NoAccessScreen />;
+    return <NoAccessScreen accountStatus={accountStatus} user={user} />;
   }
   return <MainApp uid={user.uid} email={user.email} />;
 }
 
 function MainApp({ uid, email }) {
-  const { logout } = useAuth();
+  const { logout, isAdmin } = useAuth();
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [streaming, setStreaming] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [reconnecting, setReconnecting] = useState(null); // { attempt, max } | null
+  const [showAdmin, setShowAdmin] = useState(false);
+  const [reconnecting, setReconnecting] = useState(null);
+  // Mobiel (bug 4): sidebar is op smalle schermen een uitklapbaar paneel
+  // i.p.v. altijd-zichtbare kolom.
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   // Live token-usage van de huidige/laatste stream, voor de tracker in Settings.
   const [tokenUsage, setTokenUsage] = useState({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
@@ -204,20 +210,61 @@ function MainApp({ uid, email }) {
           return;
         }
 
-        const { cleanText, artifacts } = extractArtifacts(liveContent, localId);
-        const savedId = await addMessage(uid, chatId, {
-          role: "assistant",
-          content: cleanText,
-          reasoning: liveReasoning || null,
-          artifacts: artifacts.length ? artifacts : null
-        });
-        if (artifacts.length) {
-          setArtifactsByMessage((prev) => ({ ...prev, [savedId]: artifacts }));
+        // Vangnet voor het geval het model zijn volledige antwoord (vaak met
+        // code) alleen in het denkproces zet en content leeg/zeer kort
+        // achterlaat (bug: "antwoordt soms gewoon niet" / code verschijnt
+        // alleen bij "Denkproces"). Als dat gebeurt, gebruiken we de
+        // reasoning-tekst alsnog als het echte antwoord.
+        let finalContent = liveContent;
+        let finalReasoning = liveReasoning;
+        const contentLooksEmpty = liveContent.trim().length < 3;
+        const reasoningHasRealContent = liveReasoning.trim().length > 20;
+        if (contentLooksEmpty && reasoningHasRealContent) {
+          finalContent = liveReasoning;
+          finalReasoning = "";
         }
-        await touchChat(uid, chatId);
-        setMessages((prev) => prev.filter((m) => m.id !== localId));
-        delete stoppedDraftsRef.current[chatId];
-        bumpStoppedVersion();
+
+        // BELANGRIJK: dit zit in een try/catch. Zonder vangnet zou een
+        // mislukte Firestore-write (bijv. te groot document door een
+        // afbeelding, of een tijdelijke netwerkfout) het lokale
+        // streaming-bericht voor altijd laten hangen zonder enige foutmelding
+        // -- dat was de oorzaak van "hij antwoordt soms gewoon niet" en
+        // "gaat dood met de vorige vraag" bij een volgend bericht.
+        const { cleanText, artifacts } = extractArtifacts(finalContent, localId);
+        try {
+          const savedId = await addMessage(uid, chatId, {
+            role: "assistant",
+            content: cleanText,
+            reasoning: finalReasoning || null,
+            artifacts: artifacts.length ? artifacts : null
+          });
+          if (artifacts.length) {
+            setArtifactsByMessage((prev) => ({ ...prev, [savedId]: artifacts }));
+          }
+          await touchChat(uid, chatId);
+          setMessages((prev) => prev.filter((m) => m.id !== localId));
+          delete stoppedDraftsRef.current[chatId];
+          bumpStoppedVersion();
+        } catch (saveErr) {
+          // Niet stilletjes verdwijnen: laat het bericht zichtbaar staan
+          // (niet meer "streaming") met een duidelijke foutmelding, zodat de
+          // tekst niet verloren gaat en de gebruiker weet wat er misging.
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === localId
+                ? {
+                    ...m,
+                    content: finalContent || "(leeg antwoord)",
+                    reasoning: finalReasoning,
+                    streaming: false,
+                    reasoningStreaming: false,
+                    saveError: "Opslaan in Firestore mislukt: " + saveErr.message
+                  }
+                : m
+            )
+          );
+          return;
+        }
 
         // Auto-titel (feature 14): vervangt de afgekapte placeholder-titel
         // door een korte, AI-gegenereerde titel op basis van het eerste
@@ -307,6 +354,17 @@ function MainApp({ uid, email }) {
     abortRef.current?.();
   }
 
+  async function handleNotifyAdmin() {
+    const message = window.prompt("Stuur een melding naar de beheerder:");
+    if (!message?.trim()) return;
+    try {
+      await sendNotificationToAdmin(uid, email || "Gast", message.trim());
+      alert("Melding verstuurd.");
+    } catch {
+      alert("Versturen mislukt, probeer het opnieuw.");
+    }
+  }
+
   function handleResume() {
     if (!activeChatId) return;
     const draft = stoppedDraftsRef.current[activeChatId];
@@ -349,10 +407,18 @@ function MainApp({ uid, email }) {
   // Live artifacts tijdens streaming ook al beschikbaar maken voor de
   // kaartjes EN voor het Artifact-paneel, ook terwijl het codeblok nog open
   // is (feature 2: artifact verschijnt direct, niet pas na afronding).
+  // Als het model code (nog) alleen in zijn denkproces schrijft terwijl
+  // content leeg is, zoeken we daar ook naar codeblokken, zodat de
+  // gebruiker niet naar "Denkproces tonen" hoeft te klikken om code te zien
+  // verschijnen.
   useEffect(() => {
     const streamingMsg = messages.find((m) => m.streaming);
     if (!streamingMsg) return;
-    const { artifacts } = extractArtifacts(streamingMsg.content || "", streamingMsg.id);
+    const sourceText =
+      (streamingMsg.content || "").trim().length > 0
+        ? streamingMsg.content
+        : streamingMsg.reasoning || "";
+    const { artifacts } = extractArtifacts(sourceText, streamingMsg.id);
     if (artifacts.length) {
       setArtifactsByMessage((prev) => ({ ...prev, [streamingMsg.id]: artifacts }));
       // Open automatisch het paneel zodra het eerste codeblok van dit
@@ -370,7 +436,8 @@ function MainApp({ uid, email }) {
     const arts = artifactsByMessage[m.id];
     if (!arts) return m;
     if (m.streaming || m.stoppedHere) {
-      const { cleanText } = extractArtifacts(m.content || "", m.id);
+      const sourceText = (m.content || "").trim().length > 0 ? m.content : m.reasoning || "";
+      const { cleanText } = extractArtifacts(sourceText, m.id);
       return { ...m, content: cleanText, artifacts: arts };
     }
     return { ...m, artifacts: arts };
@@ -388,20 +455,70 @@ function MainApp({ uid, email }) {
   // zodra een draft wijzigt (een ref-mutatie alleen triggert geen render).
   const canResume = !streaming && !!stoppedDraftsRef.current[activeChatId];
 
+  // Mobiel (bug 4): detecteert smalle viewports zodat het Artifact-paneel
+  // fullscreen kan renderen i.p.v. als vaste-breedte zijpaneel.
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 639px)").matches);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 639px)");
+    const handler = (e) => setIsMobile(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+
   return (
-    <div className="h-screen w-screen flex overflow-hidden p-3 gap-0">
-      <div className="flex-1 flex rounded-mac overflow-hidden shadow-mac border border-macborder mac-window-in">
-        <Sidebar
-          chats={chats}
-          activeChatId={activeChatId}
-          onSelectChat={handleSelectChat}
-          onNewChat={handleNewChat}
-          onDeleteChat={handleDeleteChat}
-          onOpenSettings={() => setShowSettings(true)}
-          onLogout={logout}
-          userEmail={email}
-          uid={uid}
-        />
+    <div className="h-screen w-screen flex overflow-hidden p-0 sm:p-3 gap-0 bg-macbg">
+      <div className="flex-1 flex rounded-none sm:rounded-mac overflow-hidden shadow-none sm:shadow-mac border-0 sm:border sm:border-macborder mac-window-in relative">
+        {/* Sidebar: vaste kolom op desktop (sm en groter), uitschuifbare
+            overlay op mobiel (bug 4: mobiele compatibiliteit). */}
+        <div className="hidden sm:flex">
+          <Sidebar
+            chats={chats}
+            activeChatId={activeChatId}
+            onSelectChat={handleSelectChat}
+            onNewChat={handleNewChat}
+            onDeleteChat={handleDeleteChat}
+            onOpenSettings={() => setShowSettings(true)}
+            onLogout={logout}
+            userEmail={email}
+            uid={uid}
+            isAdmin={isAdmin}
+            onOpenAdmin={() => setShowAdmin(true)}
+            onNotifyAdmin={handleNotifyAdmin}
+          />
+        </div>
+        {mobileSidebarOpen && (
+          <div className="sm:hidden fixed inset-0 z-40 flex">
+            <div
+              className="absolute inset-0 bg-black/40 modal-backdrop-in"
+              onClick={() => setMobileSidebarOpen(false)}
+            />
+            <div className="relative z-10 h-full w-[80vw] max-w-[300px] mac-window-in">
+              <Sidebar
+                chats={chats}
+                activeChatId={activeChatId}
+                onSelectChat={(id) => {
+                  handleSelectChat(id);
+                  setMobileSidebarOpen(false);
+                }}
+                onNewChat={() => {
+                  handleNewChat();
+                  setMobileSidebarOpen(false);
+                }}
+                onDeleteChat={handleDeleteChat}
+                onOpenSettings={() => {
+                  setShowSettings(true);
+                  setMobileSidebarOpen(false);
+                }}
+                onLogout={logout}
+                userEmail={email}
+                uid={uid}
+                isAdmin={isAdmin}
+                onOpenAdmin={() => { setShowAdmin(true); setMobileSidebarOpen(false); }}
+                onNotifyAdmin={handleNotifyAdmin}
+              />
+            </div>
+          </div>
+        )}
         <ChatWindow
           messages={messagesWithCleanContent}
           onSend={handleSend}
@@ -413,6 +530,7 @@ function MainApp({ uid, email }) {
           onStop={handleStop}
           canResume={canResume}
           onResume={handleResume}
+          onOpenMobileSidebar={() => setMobileSidebarOpen(true)}
         />
         {activeArtifactObj && (
           <ArtifactPanel
@@ -420,12 +538,16 @@ function MainApp({ uid, email }) {
             onClose={() => setOpenArtifact(null)}
             width={artifactPanelWidth}
             onResize={handleArtifactPanelResize}
+            isMobile={isMobile}
           />
         )}
       </div>
 
       {showSettings && (
         <SettingsModal onClose={() => setShowSettings(false)} tokenUsage={tokenUsage} />
+      )}
+      {showAdmin && isAdmin && (
+        <AdminPanel onClose={() => setShowAdmin(false)} />
       )}
     </div>
   );

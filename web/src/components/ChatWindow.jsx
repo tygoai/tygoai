@@ -2,6 +2,40 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { ArtifactCard } from "./ArtifactPanel.jsx";
 
+/**
+ * Schaalt een afbeelding terug naar een redelijke maximale breedte/hoogte en
+ * comprimeert 'm als JPEG, zodat de base64-data klein genoeg blijft voor een
+ * Firestore-document (limiet 1MB). Zonder dit kon het versturen van een foto
+ * vanaf een telefoon (vaak 3-10MB) het hele bericht laten falen zonder
+ * duidelijke foutmelding (bug: "afb toevoegen kan, maar er gebeurt niks").
+ */
+function resizeImageFile(file, maxDimension = 1280, quality = 0.75) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => {
+      const img = new window.Image();
+      img.onerror = () => reject(new Error("Kon afbeelding niet laden"));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDimension || height > maxDimension) {
+          const scale = maxDimension / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function ChatWindow({
   messages,
   onSend,
@@ -12,7 +46,8 @@ export default function ChatWindow({
   activeArtifactId,
   onStop,
   canResume,
-  onResume
+  onResume,
+  onOpenMobileSidebar
 }) {
   const [input, setInput] = useState("");
   const [pendingImages, setPendingImages] = useState([]); // [{ id, dataUrl, name }]
@@ -38,14 +73,12 @@ export default function ChatWindow({
   function handleFilesSelected(fileList) {
     const files = Array.from(fileList).filter((f) => f.type.startsWith("image/"));
     for (const file of files) {
-      const reader = new FileReader();
-      reader.onload = () => {
+      resizeImageFile(file, 1280, 0.75).then((dataUrl) => {
         setPendingImages((prev) => [
           ...prev,
-          { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, dataUrl: reader.result, name: file.name }
+          { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, dataUrl, name: file.name }
         ]);
-      };
-      reader.readAsDataURL(file);
+      });
     }
   }
 
@@ -80,20 +113,27 @@ export default function ChatWindow({
   return (
     <div className="flex-1 h-full flex flex-col bg-macpanel2">
       {/* Window titlebar */}
-      <div className="h-11 flex items-center justify-center border-b border-macborder shrink-0 relative">
-        <span className="text-[13px] font-medium text-macsub transition-opacity duration-200">
+      <div className="h-11 flex items-center justify-center border-b border-macborder shrink-0 relative px-3">
+        <button
+          onClick={onOpenMobileSidebar}
+          className="sm:hidden absolute left-3 w-7 h-7 flex items-center justify-center text-macsub hover:text-macink transition-colors"
+          title="Menu"
+        >
+          <MenuIcon />
+        </button>
+        <span className="text-[13px] font-medium text-macsub transition-opacity duration-200 truncate max-w-[60%]">
           {chatTitle || "TygoAI"}
         </span>
         {reconnecting && (
           <span className="absolute right-4 flex items-center gap-1.5 text-[11.5px] text-macsub fade-in-up">
             <span className="w-1.5 h-1.5 rounded-full bg-macyellow pulse-dot" />
-            Opnieuw verbinden… ({reconnecting.attempt}/{reconnecting.max})
+            <span className="hidden sm:inline">Opnieuw verbinden… ({reconnecting.attempt}/{reconnecting.max})</span>
           </span>
         )}
       </div>
 
       {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto mac-scroll px-6 py-6">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto mac-scroll px-3 sm:px-6 py-4 sm:py-6">
         {messages.length === 0 ? (
           <EmptyState />
         ) : (
@@ -122,7 +162,7 @@ export default function ChatWindow({
       </div>
 
       {/* Input */}
-      <div className="px-6 pb-5 pt-2 shrink-0">
+      <div className="px-3 sm:px-6 pb-4 sm:pb-5 pt-2 shrink-0">
         <div className="max-w-[720px] mx-auto">
           {pendingImages.length > 0 && (
             <div className="flex gap-2 mb-2 flex-wrap fade-in-up">
@@ -221,7 +261,7 @@ function MessageBubble({ message, onOpenArtifact, activeArtifactId }) {
   if (isUser) {
     return (
       <div className="flex justify-end msg-in">
-        <div className="max-w-[80%] flex flex-col items-end gap-1.5">
+        <div className="max-w-[90%] sm:max-w-[80%] flex flex-col items-end gap-1.5">
           {message.images && message.images.length > 0 && (
             <div className="flex gap-1.5 flex-wrap justify-end">
               {message.images.map((src, i) => (
@@ -249,7 +289,7 @@ function MessageBubble({ message, onOpenArtifact, activeArtifactId }) {
   return (
     <div className="flex flex-col gap-1.5 items-start msg-in">
       {message.reasoning && <ThinkingBlock text={message.reasoning} streaming={message.reasoningStreaming} />}
-      <div className="max-w-[88%] w-full flex flex-col gap-1.5">
+      <div className="max-w-[94%] sm:max-w-[88%] w-full flex flex-col gap-1.5">
         {segments.map((seg, i) =>
           seg.type === "artifact" ? (
             <ArtifactCard
@@ -281,6 +321,9 @@ function MessageBubble({ message, onOpenArtifact, activeArtifactId }) {
         )}
         {message.stoppedHere && (
           <span className="text-[11px] text-macsub px-1 italic">Gestopt door gebruiker</span>
+        )}
+        {message.saveError && (
+          <span className="text-[11px] text-macred px-1">{message.saveError}</span>
         )}
         {!message.streaming && !message.stoppedHere && message.content?.trim() && (
           <ExportMenu content={message.content} />
@@ -316,7 +359,7 @@ function ThinkingBlock({ text, streaming }) {
   const [open, setOpen] = useState(false);
 
   return (
-    <div className="max-w-[88%] w-full">
+    <div className="max-w-[94%] sm:max-w-[88%] w-full">
       <button
         onClick={() => setOpen((o) => !o)}
         className="flex items-center gap-1.5 text-[12px] text-macsub hover:text-macink transition-colors px-1 py-1"
@@ -431,6 +474,14 @@ function ExportIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+function MenuIcon() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
+      <path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }

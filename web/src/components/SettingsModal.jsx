@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getNvidiaSettings, saveNvidiaSettings } from "../lib/settings.js";
 import { BUDGET_LABELS } from "../lib/autoBudget.js";
+import { useAuth } from "../lib/auth.jsx";
 
 const PRESETS = [
   {
@@ -21,6 +22,7 @@ const PRESETS = [
 ];
 
 export default function SettingsModal({ onClose, tokenUsage }) {
+  const { isAdmin } = useAuth();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState("");
@@ -94,7 +96,7 @@ export default function SettingsModal({ onClose, tokenUsage }) {
       onClick={onClose}
     >
       <div
-        className="mac-window-in w-[480px] max-h-[85vh] overflow-y-auto mac-scroll rounded-mac shadow-mac bg-macpanel backdrop-blur-mac border border-macborder"
+        className="mac-window-in w-[92vw] sm:w-[480px] max-h-[85vh] overflow-y-auto mac-scroll rounded-mac shadow-mac bg-macpanel backdrop-blur-mac border border-macborder"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="h-11 flex items-center px-4 bg-macpanel2 border-b border-macborder sticky top-0">
@@ -117,15 +119,17 @@ export default function SettingsModal({ onClose, tokenUsage }) {
             <div className="text-[13px] text-macsub text-center py-8">Laden…</div>
           ) : (
             <div className="flex flex-col gap-5">
-              <Field label="NVIDIA API key" hint={hasKey ? "Er is al een key opgeslagen." : "Nog geen key ingesteld."}>
-                <input
-                  type="password"
-                  placeholder={hasKey ? "•••••••••••••••• (laat leeg om te behouden)" : "nvapi-..."}
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  className="w-full h-9 rounded-[9px] px-3 text-[13.5px] bg-white/70 border border-macborder focus:outline-none focus:ring-2 focus:ring-macblue/40 transition-shadow"
-                />
-              </Field>
+              {isAdmin && (
+                <Field label="NVIDIA API key" hint={hasKey ? "Er is al een key opgeslagen." : "Nog geen key ingesteld."}>
+                  <input
+                    type="password"
+                    placeholder={hasKey ? "•••••••••••••••• (laat leeg om te behouden)" : "nvapi-..."}
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    className="w-full h-9 rounded-[9px] px-3 text-[13.5px] bg-white/70 border border-macborder focus:outline-none focus:ring-2 focus:ring-macblue/40 transition-shadow"
+                  />
+                </Field>
+              )}
 
               {/* Denktijd-presets (feature 10) — vervangt de handmatige slider als
                   primaire manier om het reasoning-gedrag te kiezen. */}
@@ -232,13 +236,19 @@ export default function SettingsModal({ onClose, tokenUsage }) {
                 </div>
               )}
 
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                className="h-9 rounded-[9px] bg-macblue text-white text-[13.5px] font-medium hover:bg-macblue2 active:scale-[0.98] transition-all disabled:opacity-50"
-              >
-                {saving ? "Opslaan…" : "Opslaan"}
-              </button>
+              {isAdmin ? (
+                <button
+                  onClick={handleSave}
+                  disabled={saving}
+                  className="h-9 rounded-[9px] bg-macblue text-white text-[13.5px] font-medium hover:bg-macblue2 active:scale-[0.98] transition-all disabled:opacity-50"
+                >
+                  {saving ? "Opslaan…" : "Opslaan"}
+                </button>
+              ) : (
+                <p className="text-[11.5px] text-macsub text-center">
+                  Je bekijkt de instellingen als gast — alleen de beheerder kan wijzigingen opslaan.
+                </p>
+              )}
             </div>
           )}
         </div>

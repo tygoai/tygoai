@@ -1,36 +1,102 @@
 rules_version = '2';
 
 // ---------------------------------------------------------------------------
-// BELANGRIJK: vervang VUL_HIER_JOUW_FIREBASE_UID_IN hieronder door jouw eigen
-// Firebase UID (te vinden in Firebase Console -> Authentication -> Users,
-// nadat je voor het eerst hebt ingelogd of een account hebt aangemaakt).
-// Zonder deze stap kan NIEMAND data lezen/schrijven (fail-safe / dicht).
+// BELANGRIJK: VUL_HIER_JOUW_FIREBASE_UID_IN hieronder moet jouw eigen
+// Firebase UID zijn (Firebase Console -> Authentication -> Users).
+//
+// NIEUW (admin/gast-systeem):
+// - Jij (isAdmin) bent de enige met volledige toegang tot alles.
+// - Gast-accounts maak je zelf aan in Firebase Console -> Authentication
+//   (e-mail + wachtwoord, zie SETUP.md). Een gast krijgt toegang tot zijn
+//   EIGEN chats onder users/{gastUid}/chats/**, net als jij bij jouw eigen
+//   data, maar NIET tot jouw chats of die van andere gasten.
+// - Voor elke gebruiker (incl. gasten) bestaat een klein statusdocument op
+//   users/{uid}/account/info met velden zoals status ("active"/"locked") en
+//   displayName. Jij kan dit document voor IEDEREEN lezen (admin-tab toont
+//   dus titels/status van alle accounts) en aanpassen (lock/unlock).
+//   Gasten kunnen dit document NIET zelf aanpassen (alleen lezen, voor hun
+//   eigen status-check bij het inloggen).
+// - "Verwijderen" van een gast-account (de Firebase Auth user zelf) kan
+//   alleen via de Firebase Console, niet via deze rules -- rules regelen
+//   alleen Firestore-data, niet Authentication-accounts zelf. Hetzelfde
+//   geldt voor wachtwoord wijzigen.
+// - Gasten kunnen een melding achterlaten voor de admin via de
+//   admin_notifications-collectie (alleen schrijven, niet lezen). Jij kan ze
+//   wel lezen in de admin-tab.
 // ---------------------------------------------------------------------------
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function isOwner() {
+    function isAdmin() {
       return request.auth != null && request.auth.uid == "m5e91Bn2BXaPOaSNTIlakFehuVz1";
     }
 
-    // Chats en berichten: alleen de eigenaar mag lezen/schrijven,
-    // en alleen onder zijn eigen users/{uid} pad.
+    function isSelf(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    // Een ingelogde gebruiker mag alleen iets doen als zijn eigen
+    // accountstatus "active" is (niet vergrendeld/uitgeschakeld door de
+    // admin). De admin zelf is hiervan altijd uitgezonderd.
+    function accountIsActive(uid) {
+      return isAdmin() ||
+        (exists(/databases/$(database)/documents/users/$(uid)/account/info) &&
+         get(/databases/$(database)/documents/users/$(uid)/account/info).data.status == "active");
+    }
+
+    // Chats en berichten: eigenaar (of admin) mag lezen/schrijven, mits het
+    // account actief is (niet vergrendeld). Een vergrendelde gast kan dus
+    // niet meer chatten, maar de admin kan via de admin-tab nog wel de
+    // chat-titels zien (los statusdocument, zie hieronder).
     match /users/{uid}/chats/{chatId} {
-      allow read, write: if isOwner() && uid == request.auth.uid;
+      allow read, write: if (isSelf(uid) || isAdmin()) && accountIsActive(uid);
 
       match /messages/{messageId} {
-        allow read, write: if isOwner() && uid == request.auth.uid;
+        allow read, write: if (isSelf(uid) || isAdmin()) && accountIsActive(uid);
       }
     }
 
-    // Config (NVIDIA API key, model settings): alleen de eigenaar mag dit
-    // lezen/schrijven, rechtstreeks vanuit de browser (er is geen Cloud
-    // Function meer die dit voor je afschermt). Omdat alleen jouw account
-    // ooit kan inloggen (zie isOwner), is dit voor jouw 1-persoons-app
-    // voldoende afgeschermd.
+    // Accountstatus-document: iedereen mag zijn EIGEN status lezen (voor de
+    // "dit account is vergrendeld"-melding bij het inloggen). De admin mag
+    // het van IEDEREEN lezen (admin-tab) en als enige schrijven/aanpassen
+    // (lock/unlock/disable). Gasten kunnen hun eigen status dus niet zelf
+    // wijzigen.
+    match /users/{uid}/account/info {
+      allow read: if isSelf(uid) || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    // Config (NVIDIA API key, model settings): de admin mag dit volledig
+    // beheren. Actieve gast-accounts mogen dit ALLEEN LEZEN (niet wijzigen),
+    // zodat zij dezelfde gedeelde NVIDIA-key kunnen gebruiken om te chatten
+    // zonder dat ze een eigen key hoeven in te vullen. Dit is bewust gekozen
+    // als simpelste optie (geen Cloud Function nodig om de key te verbergen);
+    // de key is daardoor zichtbaar in de browser-devtools van een gast
+    // zolang die actief is, vergelijkbaar met hoe dat nu al voor de admin
+    // geldt. Een vergrendeld/uitgeschakeld gast-account verliest deze
+    // leestoegang automatisch (accountIsActive-check).
     match /config/{document=**} {
-      allow read, write: if isOwner();
+      allow read: if isAdmin() || accountIsActive(request.auth.uid);
+      allow write: if isAdmin();
+    }
+
+    // Meldingen van gasten naar de admin (feature: gasten kunnen een bericht
+    // achterlaten voor tygomassalt@gmail.com). Iedere ingelogde gebruiker
+    // mag een melding AANMAKEN, maar niet bewerken of lezen -- alleen de
+    // admin kan ze lezen (en zo nodig verwijderen) in de admin-tab.
+    match /admin_notifications/{notificationId} {
+      allow create: if request.auth != null &&
+        request.resource.data.fromUid == request.auth.uid;
+      allow read, delete: if isAdmin();
+      allow update: if false;
+    }
+
+    // Index van alle gast-UIDs, zodat de admin-tab een overzicht kan tonen
+    // (Firestore kan zelf geen "lijst alle subcollecties" query draaien).
+    // Uitsluitend voor de admin.
+    match /admin_guest_index/{uid} {
+      allow read, write: if isAdmin();
     }
 
     // Alles wat hierboven niet expliciet is toegestaan: standaard dicht.

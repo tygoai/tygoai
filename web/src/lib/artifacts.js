@@ -35,7 +35,18 @@ const LANG_TO_EXT = {
   shell: "sh",
   sql: "sql",
   yaml: "yaml",
-  yml: "yaml"
+  yml: "yaml",
+  // Pseudo-talen: het model gebruikt deze tags specifiek om aan te geven dat
+  // de inhoud bedoeld is als Word/PowerPoint/Excel-document (feature 5/bug 5
+  // uit de feedback). De inhoud zelf blijft gewone markdown-achtige tekst;
+  // het kaartje toont daarna direct een downloadknop naar het echte
+  // bestandsformaat in plaats van ruwe code.
+  docx: "docx",
+  word: "docx",
+  pptx: "pptx",
+  powerpoint: "pptx",
+  xlsx: "xlsx",
+  excel: "xlsx"
 };
 
 const LANG_LABEL = {
@@ -48,6 +59,9 @@ const LANG_LABEL = {
   py: "Python",
   json: "JSON",
   md: "Markdown",
+  docx: "Word-document",
+  pptx: "PowerPoint-presentatie",
+  xlsx: "Excel-spreadsheet",
   sh: "Shell",
   sql: "SQL",
   yaml: "YAML"
@@ -145,4 +159,8 @@ function guessTitle(code, ext, label) {
 
 export function isHtmlArtifact(artifact) {
   return artifact.ext === "html";
+}
+
+export function isDocumentArtifact(artifact) {
+  return artifact.ext === "docx" || artifact.ext === "pptx" || artifact.ext === "xlsx";
 }
