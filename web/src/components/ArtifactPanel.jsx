@@ -83,15 +83,20 @@ export function ArtifactCard({ artifact, onOpen, isActive }) {
  */
 export default function ArtifactPanel({ artifact, onClose, width = 440, onResize, isMobile = false }) {
   const isHtml = isHtmlArtifact(artifact);
-  const [tab, setTab] = useState(isHtml ? "preview" : "code");
+  const isDoc = isDocumentArtifact(artifact);
+  // Documenten (docx/pptx/xlsx) krijgen een "Preview"-tab met een rijke
+  // HTML-rendering van de markdown-inhoud, zodat de gebruiker ziet hoe het
+  // document er globaal uitziet — niet als ruwe code.
+  const defaultTab = isHtml || isDoc ? "preview" : "code";
+  const [tab, setTab] = useState(defaultTab);
   const [copied, setCopied] = useState(false);
   const iframeRef = useRef(null);
   const codeScrollRef = useRef(null);
   const draggingRef = useRef(false);
 
   useEffect(() => {
-    setTab(isHtml ? "preview" : "code");
-  }, [artifact.id, isHtml]);
+    setTab(isHtml || isDoc ? "preview" : "code");
+  }, [artifact.id, isHtml, isDoc]);
 
   // Tijdens live streaming: automatisch meescrollen in de code-tab zodat de
   // nieuwste regels zichtbaar blijven (feature 2 + 3).
@@ -110,6 +115,57 @@ export default function ArtifactPanel({ artifact, onClose, width = 440, onResize
     </style></head><body>${code}</body></html>`;
   }, [artifact.code, isHtml]);
 
+  // Rijke HTML-preview voor Word/PowerPoint/Excel-documenten: zet de
+  // markdown-achtige inhoud om naar opgemaakte HTML zodat de gebruiker een
+  // duidelijk beeld krijgt van de documentstructuur.
+  const docPreviewHtml = useMemo(() => {
+    if (!isDoc) return "";
+    const lines = artifact.code.split("\n");
+    const html = lines.map((line) => {
+      const t = line.trim();
+      if (!t) return "<br>";
+      if (t.startsWith("### ")) return `<h3>${esc(t.slice(4))}</h3>`;
+      if (t.startsWith("## ")) return `<h2>${esc(t.slice(3))}</h2>`;
+      if (t.startsWith("# ")) return `<h1>${esc(t.slice(2))}</h1>`;
+      if (t.startsWith("- ") || t.startsWith("* ")) return `<li>${esc(t.slice(2))}</li>`;
+      if (/^\|.*\|$/.test(t)) {
+        const cells = t.split("|").slice(1, -1).map((c) => c.trim());
+        if (cells.every((c) => /^:?-+:?$/.test(c))) return ""; // scheiding
+        return `<tr>${cells.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`;
+      }
+      if (t === "---") return `<hr>`;
+      return `<p>${esc(t)}</p>`;
+    }).join("\n");
+
+    const ext = artifact.ext;
+    const label = ext === "docx" ? "Word" : ext === "pptx" ? "PowerPoint" : "Excel";
+    const colors = { docx: "#2B579A", pptx: "#D24726", xlsx: "#217346" };
+    const color = colors[ext] || "#1d1d1f";
+
+    return `<!doctype html><html><head><meta charset="utf-8"><style>
+      body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",Helvetica,sans-serif;
+        margin:0;padding:20px 24px;color:#1d1d1f;background:#f9f9f9;font-size:14px;line-height:1.6;}
+      .badge{display:inline-block;background:${color};color:#fff;border-radius:4px;
+        padding:2px 8px;font-size:11px;font-weight:600;letter-spacing:.5px;margin-bottom:12px;}
+      h1{font-size:22px;font-weight:700;margin:16px 0 6px;color:#1d1d1f;}
+      h2{font-size:17px;font-weight:600;margin:14px 0 4px;color:#1d1d1f;
+        border-bottom:1px solid #e0e0e0;padding-bottom:4px;}
+      h3{font-size:14px;font-weight:600;margin:12px 0 2px;color:#3a3a3c;}
+      p{margin:4px 0;}li{margin:2px 0 2px 18px;}
+      table{border-collapse:collapse;width:100%;margin:8px 0;}
+      td{border:1px solid #d0d0d0;padding:5px 10px;font-size:13px;}
+      tr:nth-child(even) td{background:#f0f0f0;}
+      hr{border:none;border-top:1px solid #e0e0e0;margin:12px 0;}
+    </style></head><body>
+    <span class="badge">${label}</span>
+    ${html}
+    </body></html>`;
+  }, [artifact.code, isDoc, artifact.ext]);
+
+  function esc(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
   function handleCopy() {
     navigator.clipboard.writeText(artifact.code).then(() => {
       setCopied(true);
@@ -117,7 +173,15 @@ export default function ArtifactPanel({ artifact, onClose, width = 440, onResize
     });
   }
 
-  function handleDownload() {
+  async function handleDownload() {
+    if (isDoc) {
+      const exportLib = await import("../lib/exportDoc.js");
+      const title = artifact.title || "TygoAI-document";
+      if (artifact.ext === "docx") await exportLib.exportToDocx(title, artifact.code);
+      else if (artifact.ext === "pptx") await exportLib.exportToPptx(title, artifact.code);
+      else if (artifact.ext === "xlsx") exportLib.exportToXlsx(title, artifact.code);
+      return;
+    }
     const blob = new Blob([artifact.code], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -216,13 +280,13 @@ export default function ArtifactPanel({ artifact, onClose, width = 440, onResize
 
       {/* Tabs + acties */}
       <div className="h-10 flex items-center justify-between px-3 border-b border-macborder shrink-0">
-        {isHtml ? (
+        {isHtml || isDoc ? (
           <div className="flex items-center bg-black/[0.05] rounded-[8px] p-0.5">
             <TabButton active={tab === "preview"} onClick={() => setTab("preview")}>
               Preview
             </TabButton>
             <TabButton active={tab === "code"} onClick={() => setTab("code")}>
-              Code
+              {isDoc ? "Inhoud" : "Code"}
             </TabButton>
           </div>
         ) : (
@@ -246,7 +310,7 @@ export default function ArtifactPanel({ artifact, onClose, width = 440, onResize
 
       {/* Content */}
       <div className="flex-1 overflow-hidden">
-        {isHtml && tab === "preview" && !artifact.streaming ? (
+        {tab === "preview" && isHtml && !artifact.streaming ? (
           <iframe
             ref={iframeRef}
             srcDoc={srcDoc}
@@ -254,10 +318,17 @@ export default function ArtifactPanel({ artifact, onClose, width = 440, onResize
             sandbox="allow-scripts allow-forms allow-popups allow-modals"
             className="w-full h-full bg-white border-0"
           />
-        ) : isHtml && tab === "preview" && artifact.streaming ? (
+        ) : tab === "preview" && isDoc && !artifact.streaming ? (
+          <iframe
+            srcDoc={docPreviewHtml}
+            title={artifact.title}
+            sandbox=""
+            className="w-full h-full border-0"
+          />
+        ) : tab === "preview" && artifact.streaming ? (
           <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-macsub text-[12.5px]">
             <span className="w-2 h-2 rounded-full bg-macgreen pulse-dot" />
-            Live preview verschijnt zodra het bestand klaar is
+            Preview verschijnt zodra het document klaar is
           </div>
         ) : (
           <pre

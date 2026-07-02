@@ -173,7 +173,10 @@ function MainApp({ uid, email }) {
                   ...m,
                   content: liveContent,
                   reasoning: liveReasoning,
-                  reasoningStreaming: liveContent.length === 0
+                  // reasoningStreaming = true alleen als er al reasoning is
+                  // maar nog geen content — zodra content begint, is de
+                  // denkfase voorbij.
+                  reasoningStreaming: liveReasoning.length > 0 && liveContent.length === 0
                 }
               : m
           )
@@ -342,7 +345,7 @@ function MainApp({ uid, email }) {
         role: "assistant",
         content: "",
         reasoning: "",
-        reasoningStreaming: true,
+        reasoningStreaming: false,
         streaming: true
       }
     ]);

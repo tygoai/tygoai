@@ -127,7 +127,10 @@ export default function ChatWindow({
         {reconnecting && (
           <span className="absolute right-4 flex items-center gap-1.5 text-[11.5px] text-macsub fade-in-up">
             <span className="w-1.5 h-1.5 rounded-full bg-macyellow pulse-dot" />
-            <span className="hidden sm:inline">Opnieuw verbinden… ({reconnecting.attempt}/{reconnecting.max})</span>
+            <span className="hidden sm:inline">
+              NVIDIA overbelast — poging {reconnecting.attempt}/{reconnecting.max}
+              {reconnecting.delayMs ? `, wacht ${reconnecting.delayMs / 1000}s…` : "…"}
+            </span>
           </span>
         )}
       </div>
